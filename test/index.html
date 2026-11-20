@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local Audio & Video Tool</title>
+  <style>
+    @font-face{
+      font-family: "DuckSans";
+      src: url("../fonts/DS.woff2");
+    
+    body {
+      max-width: 760px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      font-face: DuckSans;
+      color: #222;
+    }
+
+    h1 { font-size: 1.6rem; }
+
+    section {
+      margin: 1rem 0;
+      padding: 1rem;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+
+    label {
+      display: block;
+      margin: 0.8rem 0;
+    }
+
+    input, select, button {
+      font: inherit;
+      padding: 0.45rem 0.6rem;
+    }
+
+    button { cursor: pointer; }
+
+    #status {
+      min-height: 1.5em;
+      overflow-wrap: anywhere;
+      color: #444;
+    }
+
+    #download { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Local Audio &amp; Video Tool</h1>
+  <p>Choose an operation, select your files, then click Process.</p>
+
+  <section>
+    <label>
+      Operation:
+      <select id="operation">
+        <option value="combine">Combine video and separate audio</option>
+        <option value="audio">Extract audio from a media file</option>
+        <option value="video">Extract video without audio</option>
+      </select>
+    </label>
+
+    <label>
+      Video or media file:
+      <input id="mainFile" type="file" accept="video/*,audio/*">
+    </label>
+
+    <label id="audioLabel">
+      Separate audio file:
+      <input id="audioFile" type="file" accept="audio/*">
+    </label>
+
+    <button id="processButton">Process</button>
+    <p id="status">Ready.</p>
+    <a id="download">Download result</a>
+  </section>
+
+  <script type="module">
+    import { FFmpeg } from
+      "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
+    import { toBlobURL } from
+      "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js";
+
+    const operation = document.getElementById("operation");
+    const mainFileInput = document.getElementById("mainFile");
+    const audioFileInput = document.getElementById("audioFile");
+    const audioLabel = document.getElementById("audioLabel");
+    const processButton = document.getElementById("processButton");
+    const status = document.getElementById("status");
+    const download = document.getElementById("download");
+
+    const ffmpeg = new FFmpeg();
+    let isLoaded = false;
+    let resultUrl = null;
+
+    operation.addEventListener("change", () => {
+      audioLabel.hidden = operation.value !== "combine";
+    });
+
+    async function loadFFmpeg() {
+      if (isLoaded) return;
+
+      status.textContent = "Loading processing engine (first use may take a while)…";
+
+      const baseURL =
+        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+
+      await ffmpeg.load({
+        coreURL: await toBlobURL(
+          `${baseURL}/ffmpeg-core.js`,
+          "text/javascript"
+        ),
+        wasmURL: await toBlobURL(
+          `${baseURL}/ffmpeg-core.wasm`,
+          "application/wasm"
+        )
+      });
+
+      isLoaded = true;
+    }
+
+    function safeExtension(file) {
+      const match = file.name.match(/\.([a-zA-Z0-9]+)$/);
+      return match ? match[1].toLowerCase() : "bin";
+    }
+
+    function cleanVirtualFiles(names) {
+      for (const name of names) {
+        try {
+          ffmpeg.deleteFile(name);
+        } catch {
+          // Ignore files that don't exist.
+        }
+      }
+    }
+
+    processButton.addEventListener("click", async () => {
+      const mode = operation.value;
+      const mainFile = mainFileInput.files[0];
+      const audioFile = audioFileInput.files[0];
+
+      if (!mainFile) {
+        status.textContent = "Choose a video or media file first.";
+        return;
+      }
+
+      if (mode === "combine" && !audioFile) {
+        status.textContent = "Choose a separate audio file too.";
+        return;
+      }
+
+      processButton.disabled = true;
+      download.style.display = "none";
+
+      if (resultUrl) {
+        URL.revokeObjectURL(resultUrl);
+        resultUrl = null;
+      }
+
+      const mainName = `input.${safeExtension(mainFile)}`;
+      const audioName = `audio.${safeExtension(audioFile || mainFile)}`;
+      const outputName = mode === "audio"
+        ? "audio-only.mka"
+        : mode === "video"
+          ? "video-only.mkv"
+          : "combined.mkv";
+
+      try {
+        await loadFFmpeg();
+
+        status.textContent = "Preparing files…";
+        cleanVirtualFiles([mainName, audioName, outputName]);
+
+        await ffmpeg.writeFile(
+          mainName,
+          new Uint8Array(await mainFile.arrayBuffer())
+        );
+
+        const args = ["-i", mainName];
+
+        if (mode === "combine") {
+          await ffmpeg.writeFile(
+            audioName,
+            new Uint8Array(await audioFile.arrayBuffer())
+          );
+
+          args.push(
+            "-i", audioName,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c", "copy",
+            "-shortest",
+            outputName
+          );
+        } else if (mode === "audio") {
+          args.push(
+            "-map", "0:a:0",
+            "-vn",
+            "-c", "copy",
+            outputName
+          );
+        } else {
+          args.push(
+            "-map", "0:v:0",
+            "-an",
+            "-c", "copy",
+            outputName
+          );
+        }
+
+        status.textContent = "Processing…";
+        await ffmpeg.exec(args);
+
+        const data = await ffmpeg.readFile(outputName);
+        const blob = new Blob([data], { type: "video/x-matroska" });
+        resultUrl = URL.createObjectURL(blob);
+
+        download.href = resultUrl;
+        download.download = outputName;
+        download.textContent = `Download ${outputName}`;
+        download.style.display = "inline-block";
+        status.textContent = "Done.";
+      } catch (error) {
+        console.error(error);
+        status.textContent =
+          "Processing failed. The file may not contain the requested track, " +
+          "or its format may not be supported. Try another file.";
+      } finally {
+        processButton.disabled = false;
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (resultUrl) URL.revokeObjectURL(resultUrl);
+    });
+  </script>
+</body>
+</html>
